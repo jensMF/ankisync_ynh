@@ -1,12 +1,4 @@
 #!/bin/bash
-# In simple cases, you don't need a config script.
-
-# With a simple config_panel.toml, you can write in the app settings, in the
-# upstream config file or replace complete files (logo ...) and restart services.
-
-# The config scripts allows you to go further, to handle specific cases
-# (validation of several interdependent fields, specific getter/setter for a value,
-# display dynamic informations or choices, pre-loading of config type .cube... ).
 
 #=================================================
 # IMPORT GENERIC HELPERS
@@ -14,83 +6,111 @@
 
 source /usr/share/yunohost/helpers
 
-ynh_abort_if_errors
-
 #=================================================
-# RETRIEVE ARGUMENTS
+# RETRIEVE APP SETTINGS
 #=================================================
 
-install_dir=$(ynh_app_setting_get --key=install_dir)
+data_dir=$(ynh_app_setting_get --key=data_dir)
+app=$(ynh_app_setting_get --key=app)
+env_file="$data_dir/ankisync.env"
 
 #=================================================
-# SPECIFIC GETTERS FOR TOML SHORT KEY
+# SPECIFIC GETTER FOR user_list
 #=================================================
 
-get__amount() {
-    # Here we can imagine to have an API call to stripe to know the amount of donation during a month
-    local amount=200
-
-    # It's possible to change some properties of the question by overriding it:
-    if [ "$amount" -gt 100 ]; then
-    cat << EOF
-style: success
-value: $amount
-ask:
-  en: A lot of donation this month: **$amount €**
-EOF
-    else
-    cat << EOF
-style: danger
-value: $amount
-ask:
-  en: Not so much donation this month: $amount €
-EOF
-    fi
-}
-
-get__prices() {
-    local prices
-    prices="$(grep "DONATION\['" "$install_dir/settings.py" | sed -r "s@^DONATION\['([^']*)'\]\['([^']*)'\] = '([^']*)'@\1/\2/\3@g" | sed -z 's/\n/,/g;s/,$/\n/')"
-    if [ "$prices" == "," ]; then
-        # Return YNH_NULL if you prefer to not return a value at all.
-        echo YNH_NULL
-    else
-        echo "$prices"
+# This function is called by the config panel to get the current list of users.
+# It reads the environment file and outputs a YAML-like string.
+get__user_list() {
+    if [ -f "$env_file" ]; then
+        # Read each SYNC_USER line, strip the prefix, and format as YAML for the panel
+        grep '^SYNC_USER' "$env_file" | sed 's/^SYNC_USER[0-9]*=//' | while IFS=: read -r user pass; do
+            # The format "- key: value" is important for the list widget
+            echo "- username: $user"
+            # We return an empty password. In the UI, if the admin leaves it empty, it means "keep the old one".
+            echo "  password:"
+        done
     fi
 }
 
 #=================================================
-# SPECIFIC VALIDATORS FOR TOML SHORT KEYS
+# SPECIFIC SETTER FOR user_list
 #=================================================
-validate__publishable_key() {
 
-    # We can imagine here we test if the key is really a publishable key
-    (is_secret_key "$publishable_key") &&
-        echo 'This key seems to be a secret key'
-}
+# This function is called when the admin saves the user list in the config panel.
+# It receives a YAML-like string, parses it, and writes the new environment file.
+set__user_list() {
+    # The value from the panel is automatically available in a variable named after the question id.
+    local user_list_value="$user_list"
 
-#=================================================
-# SPECIFIC SETTERS FOR TOML SHORT KEYS
-#=================================================
-set__prices() {
+    # Store old hashes before modifying the file
+    declare -A old_hashes
+    if [ -f "$env_file" ]; then
+        while IFS='=' read -r key value; do
+            if [[ "$key" == SYNC_USER* ]]; then
+                # The value is user:hash. The hash can contain colons.
+                local u="${value%%:*}"
+                local h="${value#*:}"
+                old_hashes["$u"]="$h"
+            fi
+        done < "$env_file"
+    fi
 
-    #---------------------------------------------
-    # IMPORTANT: setters are triggered only if a change is detected
-    #---------------------------------------------
-    for price in $(echo "$prices" | sed "s/,/ /"); do
-        frequency=$(echo "$price" | cut -d/ -f1)
-        currency=$(echo "$price" | cut -d/ -f2)
-        price_id=$(echo "$price" | cut -d/ -f3)
-        sed "d/DONATION\['$frequency'\]\['$currency'\]" "$install_dir/settings.py"
+    # Preserve non-user settings from the env file
+    local other_settings
+    if [ -f "$env_file" ]; then
+        other_settings=$(grep -v '^SYNC_USER' "$env_file" | grep -v '^PASSWORDS_HASHED')
+    fi
 
-        echo "DONATION['$frequency']['$currency'] = '$price_id'" >> "$install_dir/settings.py"
+    # Clear the existing user config file and add the hashed password flag
+    echo "PASSWORDS_HASHED=1" > "$env_file"
+    if [ -n "$other_settings" ]; then
+        echo "$other_settings" >> "$env_file"
+    fi
+
+    local i=1
+
+    # Parse the multi-line string from the config panel
+    echo "$user_list_value" | while IFS= read -r line; do
+        # We look for the start of a new user entry
+        if [[ $line == *"- username:"* ]]; then
+            # Extract the username from the line
+            user=$(echo "$line" | sed 's/- username: //')
+
+            # Read the next line, which should contain the password for this user
+            IFS= read -r pass_line
+            pass=$(echo "$pass_line" | sed 's/  password: //')
+
+            # Write the new SYNC_USER entry to the env file
+            # Only add users that have a username
+            if [ -n "$user" ]; then
+                # If password field was empty, keep the old hash for existing users.
+                if [ -z "$pass" ]; then
+                    if [[ ${old_hashes[$user]+_} ]]; then
+                        pass="${old_hashes[$user]}"
+                    else
+                        # This is a new user with an empty password. Hash an empty string.
+                        pass=$(echo -n "" | argon2-cli -e)
+                    fi
+                else
+                    # A new password was provided, so we hash it.
+                    pass=$(echo -n "$pass" | argon2-cli -e)
+                fi
+                echo "SYNC_USER$i=$user:$pass" >> "$env_file"
+                i=$((i+1))
+            fi
+        fi
     done
 
-    #---------------------------------------------
-    # IMPORTANT: to be able to upgrade properly, you have to save the value in settings too
-    #---------------------------------------------
-    ynh_app_setting_set --key=prices --value="$prices"
+    # Ensure the environment file has the correct ownership for the app user
+    chown "$app:$app" "$env_file"
 }
 
 #=================================================
+# SCRIPT ENTRYPOINT
+#=================================================
+
+# This helper from YunoHost will automatically call the correct
+# 'get__', 'set__', or 'validate__' function based on the script's first argument.
 ynh_app_config_run "$1"
+
+exit 0

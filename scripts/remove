@@ -3,52 +3,31 @@
 #=================================================
 # IMPORT GENERIC HELPERS
 #=================================================
-
-source _common.sh
 source /usr/share/yunohost/helpers
-
-### Settings are automatically loaded as bash variables
-### in every app script context, therefore typically these will exist:
-### - $domain
-### - $path
-### - $language
-### - $install_dir
-### - $port
-### ...
-
-### For remove operations:
-### - the core will deprovision every resource defined in the manifest **after** this script is ran
-### this includes removing the install directory, and data directory (if --purge was used)
+source ./_common.sh
 
 #=================================================
-# REMOVE SYSTEM CONFIGURATION
+# STOP AND REMOVE THE SERVICE
 #=================================================
-ynh_script_progression "Removing system configurations related to $app..."
+ynh_script_progression "Stopping and removing the $app service..."
+ynh_systemctl_action --action=stop --service_name="$app"
+yunohost service remove "$app"
 
-### This should be a symetric version of what happens in the install script
+#=================================================
+# REMOVE SYSTEM CONFIGURATIONS
+#=================================================
+ynh_script_progression "Removing system configurations for $app..."
+ynh_remove_systemd_config
+ynh_remove_nginx_config
 
-ynh_config_remove_fail2ban
-
-ynh_config_remove_logrotate
-
-# Remove the service from the list of services known by YunoHost (added from `yunohost service add`)
-if ynh_hide_warnings yunohost service status "$app" >/dev/null; then
-    yunohost service remove "$app"
-fi
-ynh_config_remove_systemd
-
-ynh_config_remove_nginx
-
-ynh_config_remove_phpfpm
-
-# Remove other various files specific to the app... such as:
-
-ynh_safe_rm "/etc/cron.d/$app"
-
-ynh_safe_rm "/etc/$app"
+#=================================================
+# REMOVE APP DIRECTORIES
+#=================================================
+ynh_script_progression "Removing $app directories..."
+rm -rf "$install_dir"
+rm -rf "$data_dir"
 
 #=================================================
 # END OF SCRIPT
 #=================================================
-
 ynh_script_progression "Removal of $app completed"

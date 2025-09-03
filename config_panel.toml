@@ -1,0 +1,20 @@
+#:schema https://github.com/YunoHost/apps/raw/main/schemas/config_panel.v1.schema.json
+
+version = "1.0"
+
+[users]
+name.en = "User Management"
+name.fr = "Gestion des utilisateurs"
+services = ["__APP__"]
+help.en = "Manage Anki sync users. The server will be restarted after any changes."
+help.fr = "Gérer les utilisateurs pour la synchronisation Anki. Le serveur sera redémarré après chaque modification."
+
+    [users.list]
+
+        [users.list.all_users]
+        ask.en = "Users (username:password)"
+        ask.fr = "Utilisateurs (nomdutilisateur:motdepasse)"
+        type = "text"
+        help.en = "Enter one user per line in the format 'username:password'."
+        help.fr = "Entrez un utilisateur par ligne au format 'nomdutilisateur:motdepasse'."
+        bind = "null"
